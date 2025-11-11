@@ -20,6 +20,9 @@ from datetime import datetime, timedelta
 import base64
 import io
 import math
+from docx import Document
+from docx.shared import Inches, Pt, RGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 import pickle
 from geopy.geocoders import Nominatim
 from geopy.distance import geodesic
@@ -220,7 +223,39 @@ VEHICLE_TYPES = {
     "Bicycle": {"speed": 15, "fuel_efficiency": 0, "cost_per_km": 0, "capacity": 1, "icon": "🚴"},
     "Auto-Rickshaw": {"speed": 40, "fuel_efficiency": 20, "cost_per_km": 12, "capacity": 3, "icon": "🛺"}
 }
-
+# Fuel types with specifications
+FUEL_TYPES = {
+    "Petrol": {
+        "price_per_liter": 100,  # ₹ per liter
+        "co2_per_liter": 2.31,   # kg CO2 per liter
+        "compatible_vehicles": ["Car", "Motorcycle", "Auto-Rickshaw"],
+        "icon": "⛽"
+    },
+    "Diesel": {
+        "price_per_liter": 90,   # ₹ per liter
+        "co2_per_liter": 2.68,   # kg CO2 per liter
+        "compatible_vehicles": ["Car", "Bus", "Truck"],
+        "icon": "🛢️"
+    },
+    "CNG": {
+        "price_per_liter": 75,   # ₹ per kg (equivalent)
+        "co2_per_liter": 1.85,   # kg CO2 per kg
+        "compatible_vehicles": ["Car", "Bus", "Auto-Rickshaw"],
+        "icon": "💨"
+    },
+    "Electric": {
+        "price_per_liter": 8,    # ₹ per kWh (cost per km equivalent)
+        "co2_per_liter": 0.5,    # kg CO2 per kWh (grid emissions)
+        "compatible_vehicles": ["Car", "Bus", "Motorcycle", "Auto-Rickshaw"],
+        "icon": "⚡"
+    },
+    "Bicycle": {
+        "price_per_liter": 0,
+        "co2_per_liter": 0,
+        "compatible_vehicles": ["Bicycle"],
+        "icon": "🚴"
+    }
+}
 # Route preferences
 ROUTE_PREFERENCES = {
     "Fastest": {"priority": "time", "description": "Minimize travel time", "icon": "⚡"},
@@ -256,19 +291,36 @@ class AdvancedPunjabPathfinder:
         distance = R * c
         return distance
     
-    def calculate_route_cost(self, path: List[str], distances: Dict, vehicle_type: str) -> float:
-        """Calculate total route cost based on vehicle type"""
+    def calculate_route_cost(self, path: List[str], distances: Dict, vehicle_type: str, fuel_type: str = "Petrol") -> Tuple[float, float, float]:
+        """Calculate total route cost based on vehicle type and fuel type"""
         if not path or len(path) < 2:
-            return 0
-        
+            return 0, 0, 0
+    
         total_distance = 0
         for i in range(len(path) - 1):
             segment_dist = distances.get(path[i], {}).get(path[i + 1], 0)
             total_distance += segment_dist
-        
+    
         vehicle_specs = VEHICLE_TYPES.get(vehicle_type, VEHICLE_TYPES["Car"])
-        cost_per_km = vehicle_specs["cost_per_km"]
-        return total_distance * cost_per_km
+        fuel_specs = FUEL_TYPES.get(fuel_type, FUEL_TYPES["Petrol"])
+    
+        # Calculate fuel consumption
+        if vehicle_specs["fuel_efficiency"] > 0:
+            if fuel_type == "Electric":
+            # For electric, calculate based on kWh per km
+                fuel_consumption = total_distance * 0.15  # Average 0.15 kWh per km
+            else:
+                fuel_consumption = total_distance / vehicle_specs["fuel_efficiency"]
+        else:
+                fuel_consumption = 0
+    
+        # Calculate fuel cost
+        fuel_cost = fuel_consumption * fuel_specs["price_per_liter"]
+    
+        # Calculate CO2 emissions
+        co2_emissions = fuel_consumption * fuel_specs["co2_per_liter"]
+    
+        return fuel_cost, fuel_consumption, co2_emissions
     
     def calculate_travel_time(self, path: List[str], distances: Dict, vehicle_type: str, traffic_factor: float = 1.0) -> float:
         """Calculate travel time considering vehicle type and traffic"""
@@ -910,7 +962,37 @@ def main():
             format_func=lambda x: f"{VEHICLE_TYPES[x]['icon']} {x}",
             help="Vehicle affects speed, cost, and route preferences"
         )
+        st.markdown("---")
         
+        # Fuel Type Selection Section
+        st.markdown("## ⛽ Fuel Type")
+        
+        # Filter fuel types compatible with selected vehicle
+        compatible_fuels = [fuel for fuel, specs in FUEL_TYPES.items() 
+                          if vehicle_type in specs["compatible_vehicles"]]
+        
+        if compatible_fuels:
+            fuel_type = st.selectbox(
+                "Choose Fuel Type",
+                compatible_fuels,
+                index=0,
+                format_func=lambda x: f"{FUEL_TYPES[x]['icon']} {x}",
+                help="Fuel type affects cost and environmental impact"
+            )
+            
+            # Fuel specifications display
+            fuel_specs = FUEL_TYPES[fuel_type]
+            
+            col_f1, col_f2 = st.columns(2)
+            with col_f1:
+                st.metric("Price/Unit", f"₹{fuel_specs['price_per_liter']}")
+            
+            with col_f2:
+                st.metric("CO2/Unit", f"{fuel_specs['co2_per_liter']:.2f} kg")
+        else:
+            fuel_type = "Petrol"
+            st.warning("No compatible fuel types for this vehicle")
+            
         # Vehicle specifications display
         vehicle_specs = VEHICLE_TYPES[vehicle_type]
         
@@ -1039,7 +1121,9 @@ def main():
                         )
                         path = pathfinder.get_path(previous, source_city, destination_city)
                         
-                        route_cost = pathfinder.calculate_route_cost(path, network, vehicle_type)
+                        route_cost, fuel_consumption, co2_emissions = pathfinder.calculate_route_cost(
+                            path, network, vehicle_type, fuel_type
+                        )
                         travel_time = pathfinder.calculate_travel_time(path, network, vehicle_type, combined_factor)
                         
                         results["Dijkstra"] = {
@@ -1048,8 +1132,11 @@ def main():
                             'path': path,
                             'nodes_visited': nodes_visited,
                             'cost': route_cost,
-                            'travel_time': travel_time
+                            'travel_time': travel_time,
+                            'fuel_consumption': fuel_consumption,
+                            'co2_emissions': co2_emissions
                         }
+                        
                     
                     elif algorithm == "A* (A-Star)":
                         distances, previous, time_taken, nodes_visited = pathfinder.a_star_enhanced(
@@ -1057,7 +1144,9 @@ def main():
                         )
                         path = pathfinder.get_path(previous, source_city, destination_city)
                         
-                        route_cost = pathfinder.calculate_route_cost(path, network, vehicle_type)
+                        route_cost, fuel_consumption, co2_emissions = pathfinder.calculate_route_cost(
+                            path, network, vehicle_type, fuel_type
+                        )
                         travel_time = pathfinder.calculate_travel_time(path, network, vehicle_type, combined_factor)
                         
                         results["A* (A-Star)"] = {
@@ -1066,7 +1155,9 @@ def main():
                             'path': path,
                             'nodes_visited': nodes_visited,
                             'cost': route_cost,
-                            'travel_time': travel_time
+                            'travel_time': travel_time,
+                            'fuel_consumption': fuel_consumption,
+                            'co2_emissions': co2_emissions
                         }
                     
                     elif algorithm == "Bellman-Ford":
@@ -1075,16 +1166,20 @@ def main():
                         )
                         path = pathfinder.get_path(previous, source_city, destination_city)
                         
-                        route_cost = pathfinder.calculate_route_cost(path, network, vehicle_type)
+                        route_cost, fuel_consumption, co2_emissions = pathfinder.calculate_route_cost(
+                            path, network, vehicle_type, fuel_type
+                        )
                         travel_time = pathfinder.calculate_travel_time(path, network, vehicle_type, combined_factor)
                         
                         results["Bellman-Ford"] = {
                             'time': time_taken,
                             'distance': distances.get(destination_city, float('inf')),
                             'path': path,
-                            'negative_cycle': has_neg_cycle,
+                            'nodes_visited': nodes_visited,
                             'cost': route_cost,
-                            'travel_time': travel_time
+                            'travel_time': travel_time,
+                            'fuel_consumption': fuel_consumption,
+                            'co2_emissions': co2_emissions
                         }
                     
                     elif algorithm == "Floyd-Warshall":
@@ -1103,15 +1198,20 @@ def main():
                                     break
                                 path.append(current)
                         
-                        route_cost = pathfinder.calculate_route_cost(path, network, vehicle_type)
+                        route_cost, fuel_consumption, co2_emissions = pathfinder.calculate_route_cost(
+                            path, network, vehicle_type, fuel_type
+                        )
                         travel_time = pathfinder.calculate_travel_time(path, network, vehicle_type, combined_factor)
                         
-                        results["Floyd-Warshall"] = {
+                        results["Floydd-Warshall"] = {
                             'time': time_taken,
-                            'distance': distance,
+                            'distance': distances.get(destination_city, float('inf')),
                             'path': path,
+                            'nodes_visited': nodes_visited,
                             'cost': route_cost,
-                            'travel_time': travel_time
+                            'travel_time': travel_time,
+                            'fuel_consumption': fuel_consumption,
+                            'co2_emissions': co2_emissions
                         }
                     
                     progress_bar.progress((i + 1) / total_algorithms)
@@ -1303,17 +1403,26 @@ def main():
                         st.metric("Fuel Cost", f"₹{fuel_cost:.0f}")
                 
                 # Detailed report generation
-                st.markdown("### Generate Report")
-                if st.button("Generate Detailed Report"):
-                    report_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    weather_condition = st.session_state.weather_data["condition"]
-                    
-                    report_content = f"""
+                st.markdown("### Generate Reports")
+                
+                col_rep1, col_rep2 = st.columns(2)
+                
+                with col_rep1:
+                    if st.button("📄 Generate Markdown Report", use_container_width=True):
+                        report_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        weather_condition = st.session_state.weather_data["condition"]
+                        
+                        fuel_cost, fuel_consumption, co2_emissions = pathfinder.calculate_route_cost(
+                            best_path, network, vehicle_type, fuel_type
+                        )
+                        
+                        report_content = f"""
 # Punjab Route Optimization Report
 
 **Generated:** {report_time}  
 **Route:** {source_city} → {destination_city}  
 **Vehicle:** {vehicle_type}  
+**Fuel Type:** {fuel_type}  
 **Optimization:** {preference} Priority  
 **Weather:** {weather_condition}  
 
@@ -1323,54 +1432,61 @@ def main():
 - **Best Algorithm:** {best_distance_algo}
 - **Total Distance:** {best_distance:.1f} km
 - **Estimated Travel Time:** {best_result['travel_time']:.0f} minutes
+- **Fuel Consumption:** {fuel_consumption:.2f} L
 - **Total Cost Estimate:** ₹{best_result['cost']:.0f}
+- **CO2 Emissions:** {co2_emissions:.2f} kg
 - **Route Efficiency:** {efficiency:.1f}%
 
 ### Algorithm Performance
 """
-                    
-                    for algo_name, data in results.items():
-                        if data.get('distance', float('inf')) != float('inf'):
-                            report_content += f"""
+                        
+                        for algo_name, data in results.items():
+                            if data.get('distance', float('inf')) != float('inf'):
+                                report_content += f"""
 #### {algo_name}
 - **Execution Time:** {data['time']:.3f} ms
 - **Route Distance:** {data['distance']:.1f} km
 - **Travel Cost:** ₹{data.get('cost', 0):.0f}
 - **Travel Time:** {data.get('travel_time', 0):.0f} minutes
+- **Fuel Consumption:** {data.get('fuel_consumption', 0):.2f} L
 """
-                    
-                    report_content += f"""
+                        
+                        report_content += f"""
 ### Environmental Impact
-- **Fuel Consumption:** {fuel_consumption:.1f} liters
-- **CO2 Emissions:** {co2_emissions:.1f} kg
+- **Fuel Type:** {fuel_type}
+- **Fuel Consumption:** {fuel_consumption:.2f} liters
+- **CO2 Emissions:** {co2_emissions:.2f} kg
+- **Trees to Offset:** {co2_emissions / 21.77:.1f}
 - **Environmental Rating:** {'Eco-Friendly' if co2_emissions < 50 else 'Moderate Impact'}
 
 ---
 *Report generated by SmartRoute Pro - Punjab Edition*
 """
-                    
-                    st.download_button(
-                        label="Download Report",
-                        data=report_content,
-                        file_name=f"route_report_{source_city}_{destination_city}.md",
-                        mime="text/markdown"
-                    )
-
-        else:
-            st.error("No valid route found between the selected cities.")
-    
-    elif not selected_algorithms:
-        st.warning("Please select at least one algorithm to calculate the route.")
-    
-    else:
-        # Show default map
-        st.markdown("### Punjab Interactive Map")
-        st.info("Configure your route settings in the sidebar and click 'Calculate Route' to find the optimal path!")
-        
-        preview_map = create_enhanced_punjab_map(
-            source_city, destination_city, traffic_data=st.session_state.traffic_data
-        )
-        st_folium(preview_map, width=700, height=500)
+                        
+                        st.download_button(
+                            label="📥 Download Markdown Report",
+                            data=report_content,
+                            file_name=f"route_report_{source_city}_{destination_city}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
+                            mime="text/markdown",
+                            use_container_width=True
+                        )
+                
+                with col_rep2:
+                    if st.button("📝 Generate Word Report", use_container_width=True):
+                        with st.spinner("Generating comprehensive Word document..."):
+                            word_doc = generate_word_report(
+                                source_city, destination_city, results, vehicle_type,
+                                fuel_type, preference, st.session_state.weather_data,
+                                st.session_state.traffic_data, best_path, network, pathfinder
+                            )
+                            
+                            st.download_button(
+                                label="📥 Download Word Report",
+                                data=word_doc,
+                                file_name=f"route_report_{source_city}_{destination_city}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx",
+                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                use_container_width=True
+                            )
     
     # Footer with information
     st.markdown("---")
@@ -1413,6 +1529,256 @@ def main():
         - **Average Distance:** 65 km between cities
         - **Algorithms:** 4 optimization methods
         """)
-
+def generate_word_report(source: str, destination: str, results: Dict, vehicle_type: str, 
+                        fuel_type: str, preference: str, weather_data: Dict, 
+                        traffic_data: Dict, best_path: List[str], network: Dict,
+                        pathfinder: AdvancedPunjabPathfinder) -> bytes:
+    """Generate comprehensive Word document report"""
+    
+    doc = Document()
+    
+    # Set document margins
+    sections = doc.sections
+    for section in sections:
+        section.top_margin = Inches(0.5)
+        section.bottom_margin = Inches(0.5)
+        section.left_margin = Inches(0.75)
+        section.right_margin = Inches(0.75)
+    
+    # Title
+    title = doc.add_heading('Punjab Route Optimization Report', 0)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    title_run = title.runs[0]
+    title_run.font.color.rgb = RGBColor(255, 107, 53)
+    
+    # Subtitle
+    subtitle = doc.add_heading('SmartRoute Pro - Advanced Multi-Criteria Analysis', level=2)
+    subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    
+    doc.add_paragraph()
+    
+    # Report metadata
+    report_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    metadata_table = doc.add_table(rows=6, cols=2)
+    metadata_table.style = 'Light Grid Accent 1'
+    
+    metadata_data = [
+        ('Report Generated', report_time),
+        ('Route', f'{source} → {destination}'),
+        ('Vehicle Type', f'{VEHICLE_TYPES[vehicle_type]["icon"]} {vehicle_type}'),
+        ('Fuel Type', f'{FUEL_TYPES[fuel_type]["icon"]} {fuel_type}'),
+        ('Optimization Priority', f'{ROUTE_PREFERENCES[preference]["icon"]} {preference}'),
+        ('Weather Condition', f'{weather_data["condition"]} ({weather_data["temperature"]}°C)')
+    ]
+    
+    for i, (label, value) in enumerate(metadata_data):
+        row = metadata_table.rows[i]
+        row.cells[0].text = label
+        row.cells[1].text = str(value)
+        row.cells[0].paragraphs[0].runs[0].font.bold = True
+    
+    doc.add_paragraph()
+    
+    # Executive Summary
+    doc.add_heading('Executive Summary', level=1)
+    
+    # Find best algorithm
+    valid_results = {k: v for k, v in results.items() if v.get('distance', float('inf')) != float('inf')}
+    if valid_results:
+        best_algo = min(valid_results.keys(), key=lambda x: valid_results[x]['distance'])
+        best_result = valid_results[best_algo]
+        
+        summary_text = (
+            f"The optimal route from {source} to {destination} was calculated using {len(results)} "
+            f"pathfinding algorithms. The {best_algo} algorithm provided the most efficient route "
+            f"with a total distance of {best_result['distance']:.1f} km, estimated travel time of "
+            f"{best_result['travel_time']:.0f} minutes, and total cost of ₹{best_result['cost']:.0f}."
+        )
+        doc.add_paragraph(summary_text)
+        
+        # Key metrics table
+        doc.add_heading('Key Performance Metrics', level=2)
+        metrics_table = doc.add_table(rows=5, cols=2)
+        metrics_table.style = 'Light List Accent 1'
+        
+        metrics_data = [
+            ('Best Algorithm', best_algo),
+            ('Total Distance', f"{best_result['distance']:.1f} km"),
+            ('Estimated Travel Time', f"{best_result['travel_time']:.0f} minutes"),
+            ('Total Fuel Cost', f"₹{best_result['cost']:.0f}"),
+            ('Fuel Consumption', f"{best_result.get('fuel_consumption', 0):.2f} L")
+        ]
+        
+        for i, (metric, value) in enumerate(metrics_data):
+            row = metrics_table.rows[i]
+            row.cells[0].text = metric
+            row.cells[1].text = str(value)
+            row.cells[0].paragraphs[0].runs[0].font.bold = True
+        
+        doc.add_paragraph()
+        
+        # Route Details
+        doc.add_heading('Detailed Route Information', level=1)
+        
+        if best_path:
+            doc.add_heading('Step-by-Step Route', level=2)
+            route_table = doc.add_table(rows=len(best_path) + 1, cols=6)
+            route_table.style = 'Light Grid Accent 1'
+            
+            # Header row
+            headers = ['Step', 'City', 'Type', 'Population', 'Distance', 'Cumulative']
+            for i, header in enumerate(headers):
+                cell = route_table.rows[0].cells[i]
+                cell.text = header
+                cell.paragraphs[0].runs[0].font.bold = True
+            
+            # Route data
+            cumulative_distance = 0
+            for idx, city in enumerate(best_path):
+                city_info = PUNJAB_CITIES[city]
+                row = route_table.rows[idx + 1]
+                
+                if idx == 0:
+                    row.cells[0].text = str(idx + 1)
+                    row.cells[1].text = city
+                    row.cells[2].text = city_info["type"].title()
+                    row.cells[3].text = f"{city_info['population']:,}"
+                    row.cells[4].text = "START"
+                    row.cells[5].text = "0 km"
+                else:
+                    segment_dist = network.get(best_path[idx-1], {}).get(city, 0)
+                    cumulative_distance += segment_dist
+                    
+                    row.cells[0].text = str(idx + 1)
+                    row.cells[1].text = city
+                    row.cells[2].text = city_info["type"].title()
+                    row.cells[3].text = f"{city_info['population']:,}"
+                    row.cells[4].text = f"{segment_dist:.1f} km"
+                    row.cells[5].text = f"{cumulative_distance:.1f} km"
+        
+        doc.add_paragraph()
+        
+        # Algorithm Performance Comparison
+        doc.add_heading('Algorithm Performance Analysis', level=1)
+        
+        algo_table = doc.add_table(rows=len(results) + 1, cols=5)
+        algo_table.style = 'Medium Shading 1 Accent 1'
+        
+        # Headers
+        algo_headers = ['Algorithm', 'Execution Time', 'Distance', 'Cost', 'Travel Time']
+        for i, header in enumerate(algo_headers):
+            cell = algo_table.rows[0].cells[i]
+            cell.text = header
+            cell.paragraphs[0].runs[0].font.bold = True
+        
+        # Algorithm data
+        for idx, (algo_name, data) in enumerate(results.items(), 1):
+            row = algo_table.rows[idx]
+            row.cells[0].text = algo_name
+            row.cells[1].text = f"{data['time']:.3f} ms"
+            
+            if data.get('distance', float('inf')) == float('inf'):
+                row.cells[2].text = "No path"
+                row.cells[3].text = "-"
+                row.cells[4].text = "-"
+            else:
+                row.cells[2].text = f"{data['distance']:.1f} km"
+                row.cells[3].text = f"₹{data.get('cost', 0):.0f}"
+                row.cells[4].text = f"{data.get('travel_time', 0):.0f} min"
+        
+        doc.add_paragraph()
+        
+        # Fuel and Cost Analysis
+        doc.add_heading('Fuel & Cost Analysis', level=1)
+        
+        fuel_specs = FUEL_TYPES[fuel_type]
+        vehicle_specs = VEHICLE_TYPES[vehicle_type]
+        
+        fuel_cost, fuel_consumption, co2_emissions = pathfinder.calculate_route_cost(
+            best_path, network, vehicle_type, fuel_type
+        )
+        
+        fuel_table = doc.add_table(rows=7, cols=2)
+        fuel_table.style = 'Light List Accent 1'
+        
+        fuel_data = [
+            ('Fuel Type', fuel_type),
+            ('Price per Liter/kg', f"₹{fuel_specs['price_per_liter']:.2f}"),
+            ('Vehicle Efficiency', f"{vehicle_specs['fuel_efficiency']} km/L"),
+            ('Fuel Consumption', f"{fuel_consumption:.2f} {'L' if fuel_type != 'Electric' else 'kWh'}"),
+            ('Total Fuel Cost', f"₹{fuel_cost:.2f}"),
+            ('CO2 Emissions', f"{co2_emissions:.2f} kg"),
+            ('Environmental Rating', 'Eco-Friendly' if co2_emissions < 50 else 'Moderate Impact')
+        ]
+        
+        for i, (label, value) in enumerate(fuel_data):
+            row = fuel_table.rows[i]
+            row.cells[0].text = label
+            row.cells[1].text = str(value)
+            row.cells[0].paragraphs[0].runs[0].font.bold = True
+        
+        doc.add_paragraph()
+        
+        # Environmental Impact
+        doc.add_heading('Environmental Impact Assessment', level=1)
+        
+        tree_offset = co2_emissions / 21.77  # kg CO2 absorbed by one tree per year
+        
+        env_text = (
+            f"This journey will produce approximately {co2_emissions:.2f} kg of CO2 emissions. "
+            f"To offset these emissions, approximately {tree_offset:.1f} trees would need to be "
+            f"planted and grown for one year. "
+        )
+        
+        if fuel_type == "Electric":
+            env_text += "Using electric vehicles significantly reduces emissions compared to conventional fuels."
+        elif fuel_type == "CNG":
+            env_text += "CNG is a cleaner alternative to petrol and diesel, producing fewer emissions."
+        
+        doc.add_paragraph(env_text)
+        
+        # Recommendations
+        doc.add_heading('Recommendations', level=1)
+        
+        recommendations = []
+        
+        if fuel_type in ["Petrol", "Diesel"]:
+            recommendations.append("Consider switching to CNG or Electric vehicles for reduced emissions and lower operating costs.")
+        
+        if best_result['travel_time'] > 180:
+            recommendations.append("For long journeys, plan for rest stops every 2-3 hours for safety.")
+        
+        if weather_data["condition"] in ["Heavy Rain", "Fog"]:
+            recommendations.append(f"Current weather ({weather_data['condition']}) may affect travel time. Drive carefully and allow extra time.")
+        
+        # Check traffic in route cities
+        high_traffic_cities = []
+        for city in best_path:
+            if city in traffic_data and traffic_data[city]["level"] == "High":
+                high_traffic_cities.append(city)
+        
+        if high_traffic_cities:
+            recommendations.append(f"High traffic expected in: {', '.join(high_traffic_cities)}. Consider alternative departure times.")
+        
+        for rec in recommendations:
+            p = doc.add_paragraph(rec, style='List Bullet')
+        
+        doc.add_paragraph()
+        
+        # Footer
+        doc.add_paragraph()
+        footer_para = doc.add_paragraph()
+        footer_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        footer_run = footer_para.add_run('Report generated by SmartRoute Pro - Punjab Edition')
+        footer_run.font.size = Pt(9)
+        footer_run.font.italic = True
+        footer_run.font.color.rgb = RGBColor(128, 128, 128)
+    
+    # Save to bytes
+    doc_buffer = io.BytesIO()
+    doc.save(doc_buffer)
+    doc_buffer.seek(0)
+    
+    return doc_buffer.getvalue()
 if __name__ == "__main__":
     main()
