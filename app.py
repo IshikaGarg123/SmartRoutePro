@@ -1355,7 +1355,7 @@ def main():
                         file_name=f"route_report_{source_city}_{destination_city}.md",
                         mime="text/markdown"
                     )
-        
+
         else:
             st.error("No valid route found between the selected cities.")
     
